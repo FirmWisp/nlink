@@ -6,12 +6,25 @@ obj-m := vl_stealth_5x.o
 KVER ?= $(shell uname -r)
 KDIR ?= /lib/modules/$(KVER)/build
 
+GO ?= /usr/local/go/bin/go
+GO_CONTROL := vl_control_go
+
 ccflags-y := -w
 
-all:
+all: module control
+
+module:
 	@make -C $(KDIR) M=$(PWD) modules 2>/dev/null || make -C $(KDIR) M=$(PWD) modules
 
-clean:
-	@make -C $(KDIR) M=$(PWD) clean 2>/dev/null || rm -f *.o *.ko *.mod.c *.mod *.symvers *.order
+control: $(GO_CONTROL)
 
-.PHONY: all clean
+$(GO_CONTROL): vl_control.go
+	$(GO) build -o $(GO_CONTROL) vl_control.go
+
+clean:
+	@cp go.mod /tmp/vl_control_go.mod.bak 2>/dev/null || true
+	@make -C $(KDIR) M=$(PWD) clean 2>/dev/null || rm -f *.o *.ko *.mod.c *.mod *.symvers *.order
+	@cp /tmp/vl_control_go.mod.bak go.mod 2>/dev/null || true
+	rm -f $(GO_CONTROL)
+
+.PHONY: all module control clean
