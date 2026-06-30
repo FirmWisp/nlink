@@ -1,0 +1,12 @@
+**/*.ko
+**/*.o
+**/*.mod
+**/*.mod.c
+**/*.symvers
+**/*.order
+**/vl_control_go
+ebpf-6.x/ebpf/*.bpf.o
+ebpf-6.x/vmlinux.h
+ebpf-6.x/stealth_ctl
+**/.tmp_versions/
+**/tem
